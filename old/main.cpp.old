@@ -1,0 +1,131 @@
+#include <Arduino.h>
+
+#define PULSE_LENGTH 835 //microseconds
+#define PULSE_COUNT_DELAY 5 //count
+#define INTERCOM 19
+#define DEBUG_OUTPUT 18
+
+uint8_t dataframe_count;
+unsigned long prev_frame_end_time;
+unsigned long timer_offset;
+
+struct Waveform_Point {
+   unsigned long time;
+   uint8_t state;
+  //  unsigned long prev_adj_time;
+};
+
+struct Waveform {
+  const uint8_t PIN;
+  unsigned long start_time;  
+  unsigned long last_changed_time;
+  bool active;
+  bool dump_data;  
+  uint8_t array_index;
+  
+};
+
+Waveform waveform = {INTERCOM, 0, 0, false, false, 0};
+
+void IRAM_ATTR isr() {
+  unsigned long curr_time = esp_timer_get_time(); 
+  if (waveform.active != true) {
+    waveform.active = true;
+    waveform.dump_data = true;
+    waveform.start_time = curr_time;
+    waveform.array_index = 0;
+  }
+  unsigned long adj_time = curr_time - waveform.start_time;
+  // unsigned long prev_adj_time = adj_time;
+  if (adj_time != 0 && adj_time > (PULSE_LENGTH - PULSE_LENGTH / 3) && adj_time < (PULSE_LENGTH + PULSE_LENGTH / 3)) {
+    adj_time = PULSE_LENGTH;
+  } else {
+    float t_adj_time = adj_time;
+    adj_time = (round(t_adj_time / PULSE_LENGTH) * PULSE_LENGTH);
+  }
+  
+  waveform.last_changed_time = curr_time;
+  uint8_t state;
+  if (digitalRead(waveform.PIN) == HIGH) {
+    state = 1;
+  } else {
+    state = 0;
+  }
+  
+  if (waveform.datapoints[waveform.array_index-1].state != state) {
+    waveform.datapoints[waveform.array_index] = {adj_time, state};  
+    waveform.array_index++;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(DEBUG_OUTPUT, OUTPUT);
+  digitalWrite(DEBUG_OUTPUT, HIGH);
+  pinMode(waveform.PIN, INPUT);
+  attachInterrupt(waveform.PIN, isr, CHANGE);
+  dataframe_count = 1;
+  prev_frame_end_time = 0;
+}
+
+void loop() {
+  if (waveform.active == true) {
+    digitalWrite(DEBUG_OUTPUT, LOW);
+    if (esp_timer_get_time() - waveform.last_changed_time > (PULSE_COUNT_DELAY * PULSE_LENGTH) && \
+      waveform.datapoints[waveform.array_index-1].state != 0) {
+      waveform.active = false;
+    }
+  } else {
+    digitalWrite(DEBUG_OUTPUT, HIGH);
+    if (waveform.dump_data == true) {
+      waveform.dump_data = false;
+      if (waveform.array_index > 1) {
+       
+        Serial.print("Frame ");
+        Serial.print(dataframe_count);
+        Serial.print(" ( ");
+        Serial.print(waveform.start_time);
+        Serial.print(" - ");
+        Serial.print(waveform.last_changed_time);
+        Serial.println(" )");
+
+        Serial.print("Total Unadjusted length: ");
+        Serial.print(waveform.last_changed_time - waveform.start_time);
+        Serial.println(" microseconds");
+        Serial.print("Time since last frame: ");
+        Serial.print((waveform.start_time - prev_frame_end_time) / 1000UL);
+        Serial.println(" milliseconds");
+        Serial.print("Total changes: ");
+        Serial.println(waveform.array_index);
+
+        Serial.println("Datapoints: ");
+        int counter = 1;
+        for (int i=0; i<waveform.array_index; i++) {
+          Waveform_Point datapoint = waveform.datapoints[i];
+          Waveform_Point next_datapoint = waveform.datapoints[i+1];
+          if (next_datapoint.time == 0){
+            continue;
+          }
+          int iterations = (next_datapoint.time - datapoint.time) / PULSE_LENGTH;
+          for (int j=1; j<=iterations; j++) {
+            unsigned long t_offset = datapoint.time + (j * PULSE_LENGTH) - PULSE_LENGTH;
+            Serial.print("  ");
+            Serial.print(counter);
+            Serial.print(", Time: ");
+            Serial.print(t_offset);
+            Serial.print(", State: ");
+            Serial.println(datapoint.state);
+            // Serial.print(", UnAdjustedTime: ");
+            // Serial.println(datapoint.prev_adj_time);
+            counter++;
+          }
+          
+        }
+        dataframe_count++;
+      }
+      prev_frame_end_time = waveform.last_changed_time;
+      Waveform waveform = {INTERCOM, 0, 0, false, false, 0};
+    }
+  }
+  delayMicroseconds(250); 
+}
